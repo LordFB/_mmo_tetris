@@ -1,0 +1,125 @@
+:root {
+  --nes-cyan: #3cbcfc;
+  --nes-white: #fcfcfc;
+  --nes-red: #f83800;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: #000;
+  font-family: ui-monospace, "Courier New", Consolas, monospace;
+}
+
+/* The CRT is locked to a 4:3 tube, centred by JS (see resize()). The viewport
+   behind it stays black — the dark room around the television. */
+#game {
+  position: fixed;
+  display: block;
+  background: #000;
+  /* size/left/top are set inline by resize() to keep a 4:3 aspect */
+}
+
+/* Crisp composite target: hidden behind the CRT unless WebGL is unavailable.
+   In the fallback it is letterboxed to 4:3 and centred to match the tube. */
+#source {
+  position: fixed;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: min(100vw, calc(100vh * 4 / 3));
+  height: min(100vh, calc(100vw * 3 / 4));
+  display: none;
+  image-rendering: pixelated;
+  background: #000;
+  object-fit: fill;
+}
+#source.visible-fallback { display: block; }
+
+/* ---------- lobby overlay ---------- */
+.lobby {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  z-index: 10;
+  background: radial-gradient(120% 120% at 50% 40%, rgba(0,0,0,0.35), rgba(0,0,0,0.85));
+  transition: opacity 0.3s;
+}
+.lobby.hidden { opacity: 0; pointer-events: none; }
+
+.lobby-box {
+  width: min(92vw, 360px);
+  padding: 1.8rem 1.6rem 1.6rem;
+  border: 3px solid var(--nes-white);
+  background: #000;
+  text-align: center;
+  box-shadow: 0 0 0 3px #000, 0 0 40px rgba(60, 188, 252, 0.25);
+}
+.lobby-box h1 {
+  margin: 0 0 0.4rem;
+  color: var(--nes-white);
+  font-size: 1.9rem;
+  letter-spacing: 0.14em;
+  text-shadow: 3px 3px 0 var(--nes-cyan);
+}
+.lobby-box h1 span { color: var(--nes-cyan); margin-left: 0.35em; }
+#lobby-msg {
+  margin: 0 0 1.2rem;
+  color: var(--nes-cyan);
+  font-size: 0.72rem;
+  letter-spacing: 0.18em;
+}
+.lobby-box label {
+  display: block;
+  margin: 0.6rem 0;
+  color: var(--nes-white);
+  font-size: 0.62rem;
+  letter-spacing: 0.14em;
+  text-align: left;
+}
+.lobby-box input {
+  display: block;
+  width: 100%;
+  margin-top: 0.3rem;
+  padding: 0.55rem 0.6rem;
+  background: #000;
+  border: 2px solid var(--nes-white);
+  color: var(--nes-cyan);
+  font: inherit;
+  font-size: 0.95rem;
+  letter-spacing: 0.1em;
+}
+.lobby-box input:focus { outline: none; border-color: var(--nes-cyan); }
+.lobby-box button {
+  margin-top: 1.1rem;
+  width: 100%;
+  padding: 0.8rem;
+  background: var(--nes-cyan);
+  border: 2px solid var(--nes-white);
+  color: #000;
+  font: inherit;
+  font-weight: 700;
+  font-size: 1rem;
+  letter-spacing: 0.16em;
+  cursor: pointer;
+}
+.lobby-box button:hover { background: var(--nes-white); }
+.lobby-status {
+  margin: 1rem 0 0.4rem;
+  font-size: 0.7rem;
+  letter-spacing: 0.1em;
+  color: var(--nes-cyan);
+}
+.lobby-keys {
+  margin: 0;
+  color: #8a8a8a;
+  font-size: 0.56rem;
+  letter-spacing: 0.08em;
+  line-height: 1.6;
+}

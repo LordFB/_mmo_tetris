@@ -1,0 +1,15 @@
+{
+  "name": "mmo-tetris-vanilla",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "start": "node server.mjs",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.4.1",
+    "express": "^5.1.0",
+    "ws": "^8.18.3"
+  }
+}

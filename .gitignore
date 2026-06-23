@@ -1,0 +1,4 @@
+node_modules/
+plays.sqlite
+plays.sqlite-shm
+plays.sqlite-wal
