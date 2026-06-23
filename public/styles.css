@@ -41,6 +41,43 @@ html, body {
 }
 #source.visible-fallback { display: block; }
 
+/* ---------- tamper trolls (cosmetic only — the score is already blocked) ---
+   Layered onto the visible canvas via CSS so the WebGL CRT pipeline is left
+   untouched. Effects escalate with tamper severity and auto-expire (the JS
+   removes the class when its timer runs out). */
+#game.troll-pink {
+  filter: hue-rotate(290deg) saturate(2.2) contrast(1.05);
+  transition: filter 0.4s ease;
+}
+#game.troll-flip {
+  transform: rotate(180deg) scaleX(-1);
+  transition: transform 0.6s cubic-bezier(0.6, -0.2, 0.3, 1.4);
+}
+
+/* Confetti rains from the top across the whole viewport, above the tube but
+   below the lobby. Purely decorative; ignores pointer events. */
+#confetti {
+  position: fixed;
+  inset: 0;
+  z-index: 8;
+  pointer-events: none;
+  overflow: hidden;
+}
+.confetti-bit {
+  position: absolute;
+  top: -5vh;
+  display: block;
+  border-radius: 1px;
+  will-change: transform, opacity;
+  animation-name: confetti-fall;
+  animation-timing-function: linear;
+  animation-fill-mode: forwards;
+}
+@keyframes confetti-fall {
+  0%   { transform: translate(0, 0) rotate(0deg); opacity: 1; }
+  100% { transform: translate(var(--drift, 0), 110vh) rotate(900deg); opacity: 0.9; }
+}
+
 /* ---------- lobby overlay ---------- */
 .lobby {
   position: fixed;

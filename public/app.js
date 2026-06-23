@@ -649,13 +649,105 @@ function handleMessage(m) {
       statusEl.textContent = `✓ VERIFIED ${pad(m.score, 6)}`;
       break;
     case "play_rejected":
-      statusEl.textContent = `✕ ${String(m.reason || "rejected").toUpperCase()}`;
+      // The score was blocked server-side; respond with an escalating troll.
+      // A rate-limited resubmit (sev 1) is treated gently — confetti only.
+      troll(m.severity ?? 2, m.reason || "rejected");
+      break;
+    case "tamper":
+      // Tampered live data was dropped server-side; wink back at the attempt.
+      troll(m.severity ?? 2, m.reason || "tamper");
       break;
     case "error":
       statusEl.textContent = String(m.error || "error").toUpperCase();
       break;
   }
 }
+
+// ---------------------------------------------------------------------------
+// Tamper trolls — the security posture is BLOCK FIRST, then be silly.
+//
+// Every cheat surface (forged play_complete, tampered snapshot, console poking)
+// is already rejected by the server / engine: a tampered score is never
+// recorded, a tampered board is dropped. None of the effects below grant the
+// attacker anything — they are purely cosmetic consequences that escalate with
+// how brazen the attempt was, so a dev who pokes the system gets confetti and a
+// pink, upside-down screen instead of a high score.
+//
+//   severity 1  honest mistake / rate-limit  -> confetti
+//   severity 2  malformed / tampered data     -> confetti + pink palette
+//   severity 3  forged input or fake record   -> confetti + pink + flip screen
+//
+// Effects are layered onto the visible #game canvas via CSS (independent of the
+// CRT shader) plus a confetti overlay, and auto-expire.
+// ---------------------------------------------------------------------------
+const CONFETTI_COLORS = [NES_CYAN, NES_RED, NES_GREEN, "#fc9838", "#f8b8f8", NES_WHITE];
+let pinkUntil = 0;
+let flipUntil = 0;
+
+function ensureConfettiLayer() {
+  let layer = document.querySelector("#confetti");
+  if (!layer) {
+    layer = document.createElement("div");
+    layer.id = "confetti";
+    document.body.appendChild(layer);
+  }
+  return layer;
+}
+
+function burstConfetti(count) {
+  const layer = ensureConfettiLayer();
+  for (let i = 0; i < count; i++) {
+    const bit = document.createElement("i");
+    bit.className = "confetti-bit";
+    const size = 6 + Math.random() * 8;
+    bit.style.left = Math.random() * 100 + "vw";
+    bit.style.width = size + "px";
+    bit.style.height = size * (0.4 + Math.random() * 0.8) + "px";
+    bit.style.background = CONFETTI_COLORS[(Math.random() * CONFETTI_COLORS.length) | 0];
+    bit.style.animationDuration = 1.6 + Math.random() * 1.6 + "s";
+    bit.style.animationDelay = Math.random() * 0.3 + "s";
+    bit.style.setProperty("--drift", (Math.random() * 2 - 1) * 30 + "vw");
+    bit.addEventListener("animationend", () => bit.remove());
+    layer.appendChild(bit);
+  }
+}
+
+// Re-apply the active visual punishments to the canvas. CSS transitions handle
+// the easing; we just toggle classes on/off as the timers expire.
+function applyTrollVisuals() {
+  const now = performance.now();
+  glCanvas.classList.toggle("troll-pink", now < pinkUntil);
+  glCanvas.classList.toggle("troll-flip", now < flipUntil);
+}
+
+/** Block already happened upstream; this is the silly consequence. */
+function troll(severity, reason) {
+  const sev = Math.max(1, Math.min(3, severity | 0));
+  burstConfetti(sev === 1 ? 24 : sev === 2 ? 60 : 120);
+  const now = performance.now();
+  if (sev >= 2) pinkUntil = Math.max(pinkUntil, now + 6000);
+  if (sev >= 3) flipUntil = Math.max(flipUntil, now + 4000);
+  applyTrollVisuals();
+  if (reason) statusEl.textContent = `✕ BLOCKED — ${String(reason).toUpperCase()}`;
+}
+
+// Keep the canvas classes in sync as the troll timers wind down.
+setInterval(applyTrollVisuals, 250);
+
+// ---------------------------------------------------------------------------
+// Integrity honeypot — a cheap "nice try" wink for someone editing engine
+// constants from the console. WIDTH/HEIGHT/MAX_REPLAY_FRAMES are imported
+// bindings (immutable), but a tamperer might redefine globals or freeze-bust
+// the engine; if our own invariants ever read wrong, fire a local troll. This
+// grants nothing — the server still re-simulates every ranked score.
+// ---------------------------------------------------------------------------
+const INTEGRITY = { width: WIDTH, height: HEIGHT, maxFrames: MAX_REPLAY_FRAMES };
+setInterval(() => {
+  if (WIDTH !== INTEGRITY.width || HEIGHT !== INTEGRITY.height ||
+      MAX_REPLAY_FRAMES !== INTEGRITY.maxFrames) {
+    troll(3, "nice try");
+  }
+}, 2000);
 
 // ---------------------------------------------------------------------------
 // boot

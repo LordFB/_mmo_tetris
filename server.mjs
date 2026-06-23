@@ -27,27 +27,36 @@ function cleanName(value) {
  * Anti-cheat: re-simulate the submitted replay with the shared NES engine and
  * derive the authoritative score. The client's claimed numbers are never
  * trusted — only the result of re-running { seed, startLevel, inputs }.
+ *
+ * Rejections carry a `severity` so the front-end can scale its (purely
+ * cosmetic) response. The submission is ALWAYS dropped regardless of severity —
+ * severity only governs how silly the client gets about it:
+ *   1 = honest mistake (empty / no-name / rate-limited — not produced here)
+ *   2 = malformed: bounds-violating but possibly a stale/buggy client
+ *   3 = forged: illegal controller bytes, or claiming a record for a game that
+ *       never topped out — these only happen if someone hand-built the message
  */
 export function verifyPlay(message) {
   const { seed, startLevel, inputs } = message;
   if (!Number.isInteger(seed) || seed < 0 || seed > 0xffff) {
-    return { ok: false, reason: "bad seed" };
+    return { ok: false, reason: "bad seed", severity: 2 };
   }
   if (!Number.isInteger(startLevel) || startLevel < 0 || startLevel > 29) {
-    return { ok: false, reason: "bad level" };
+    return { ok: false, reason: "bad level", severity: 2 };
   }
   if (!Array.isArray(inputs) || inputs.length === 0) {
-    return { ok: false, reason: "no inputs" };
+    return { ok: false, reason: "no inputs", severity: 2 };
   }
   if (inputs.length > MAX_REPLAY_FRAMES) {
-    return { ok: false, reason: "too long" };
+    return { ok: false, reason: "too long", severity: 2 };
   }
-  // Inputs must be small integers within the legal controller bitfield.
+  // Inputs must be small integers within the legal controller bitfield. A byte
+  // outside the legal mask cannot come from the real client — it was forged.
   const buf = new Uint8Array(inputs.length);
   for (let i = 0; i < inputs.length; i++) {
     const v = inputs[i];
     if (!Number.isInteger(v) || v < 0 || v > 0xff || (v & ~INPUT_MASK) !== 0) {
-      return { ok: false, reason: "bad input" };
+      return { ok: false, reason: "bad input", severity: 3 };
     }
     buf[i] = v;
   }
@@ -56,13 +65,13 @@ export function verifyPlay(message) {
   try {
     final = runReplay({ seed, startLevel, inputs: buf });
   } catch (err) {
-    return { ok: false, reason: "replay error" };
+    return { ok: false, reason: "replay error", severity: 2 };
   }
 
   // A ranked play must have actually ended (topped out). This stops someone
   // from submitting a still-running game's partial high score.
   if (final.phase !== "game_over") {
-    return { ok: false, reason: "not finished" };
+    return { ok: false, reason: "not finished", severity: 3 };
   }
 
   return {
@@ -149,6 +158,17 @@ export function createServer({
 
   const send = (socket, message) => {
     if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
+  };
+
+  // Snapshots arrive ~10x/sec, so a tampered stream could spam the client with
+  // troll events. Notify at most once per TAMPER_NOTICE_MS per socket. The bad
+  // data is always dropped regardless; this only governs the cosmetic notice.
+  const TAMPER_NOTICE_MS = 4_000;
+  const maybeFlagTamper = (socket, severity) => {
+    const now = Date.now();
+    if (now - (socket.lastTamper || 0) < TAMPER_NOTICE_MS) return;
+    socket.lastTamper = now;
+    send(socket, { type: "tamper", reason: "bad snapshot", severity });
   };
   const broadcast = (message) => clients.forEach((socket) => send(socket, message));
   const presence = () => broadcast({ type: "presence", players: clients.size });
@@ -270,6 +290,7 @@ export function createServer({
     socket.snapshot = null;
     socket.joinOrder = joinCounter++;
     socket.lastSubmit = 0;
+    socket.lastTamper = 0;
     clients.add(socket);
 
     socket.on("pong", () => { socket.alive = true; });
@@ -305,15 +326,26 @@ export function createServer({
           if (!socket.playerName) return;
           // Trust the snapshot ONLY for the live spectator view — never for
           // ranking. Validate shape and bound it.
-          if (!Array.isArray(message.board) || message.board.length !== 200) return;
+          if (!Array.isArray(message.board) || message.board.length !== 200) {
+            return maybeFlagTamper(socket, 2);
+          }
           // Drop out-of-order snapshots so neighbour views never go backwards.
           const frame = Number.isInteger(message.frame) ? message.frame : 0;
           if (socket.snapshot && frame < socket.snapshot.frame) break;
           const board = new Uint8Array(200);
+          let dirtyCells = false;
           for (let i = 0; i < 200; i++) {
             const v = message.board[i];
-            board[i] = Number.isInteger(v) && v >= 0 && v <= 7 ? v : 0;
+            if (Number.isInteger(v) && v >= 0 && v <= 7) {
+              board[i] = v;
+            } else {
+              // The real client only ever emits 0..7. An out-of-range cell is a
+              // hand-edited snapshot; clamp it (block) and flag the attempt.
+              board[i] = 0;
+              dirtyCells = true;
+            }
           }
+          if (dirtyCells) maybeFlagTamper(socket, 2);
           socket.snapshot = {
             frame,
             board: Array.from(board),
@@ -329,16 +361,24 @@ export function createServer({
         }
 
         case "play_complete": {
-          if (!socket.playerName) return send(socket, { type: "play_rejected", reason: "no name" });
+          if (!socket.playerName) {
+            return send(socket, { type: "play_rejected", reason: "no name", severity: 1 });
+          }
           const now = Date.now();
           if (now - socket.lastSubmit < MIN_SUBMIT_INTERVAL_MS) {
-            return send(socket, { type: "play_rejected", reason: "rate limited" });
+            return send(socket, { type: "play_rejected", reason: "rate limited", severity: 1 });
           }
           socket.lastSubmit = now;
 
           const result = verifyPlay(message);
           if (!result.ok) {
-            return send(socket, { type: "play_rejected", reason: result.reason });
+            // Blocked: the score is never recorded. `severity` only tells the
+            // client how silly to be about the rejection — see app.js troll().
+            return send(socket, {
+              type: "play_rejected",
+              reason: result.reason,
+              severity: result.severity ?? 2,
+            });
           }
           store.recordPlay({
             name: socket.playerName,

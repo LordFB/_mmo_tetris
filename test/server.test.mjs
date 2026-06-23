@@ -47,3 +47,20 @@ test("verifyPlay re-simulates and rejects implausible submissions", () => {
   assert.equal(verifyPlay({ seed: 0, startLevel: 50, inputs: [0] }).ok, false);
   assert.equal(verifyPlay({ seed: 0, startLevel: 0, inputs: [] }).ok, false);
 });
+
+test("verifyPlay classifies rejections by severity (block + scale the troll)", () => {
+  // Forged controller bytes can only be hand-built -> highest severity.
+  assert.equal(verifyPlay({ seed: 0x1, startLevel: 0, inputs: [255] }).severity, 3);
+  // Claiming a record for a game that never topped out -> forged -> severity 3.
+  const unfinished = verifyPlay({ seed: 0x1, startLevel: 0, inputs: [0] });
+  assert.equal(unfinished.ok, false);
+  assert.equal(unfinished.reason, "not finished");
+  assert.equal(unfinished.severity, 3);
+  // Bounds-violating but possibly a stale/buggy client -> malformed -> severity 2.
+  assert.equal(verifyPlay({ seed: -5, startLevel: 0, inputs: [0] }).severity, 2);
+  assert.equal(verifyPlay({ seed: 0, startLevel: 50, inputs: [0] }).severity, 2);
+  // A valid play carries no severity — nothing to troll.
+  const inputs = [];
+  for (let i = 0; i < 2000; i++) inputs.push(INPUT_DOWN);
+  assert.equal(verifyPlay({ seed: 0x2222, startLevel: 0, inputs }).severity, undefined);
+});
