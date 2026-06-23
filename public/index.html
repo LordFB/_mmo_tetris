@@ -7,30 +7,14 @@
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
-    <!-- The entire screen is the CRT. Everything (boards, leaderboard, next,
-         score panels) is drawn as NES pixel art onto #source, then this WebGL
-         canvas displays it through the CRT shader. -->
+    <!-- The entire screen is the CRT. EVERYTHING — boards, leaderboard, next,
+         score panels AND the lobby (title, name/level fields, START button) —
+         is drawn as NES pixel art onto #source, then this WebGL canvas displays
+         it through the CRT shader, so the UI lives inside the tube. Hover, click
+         and text entry are handled manually against the canvas (see app.js). -->
     <canvas id="game"></canvas>
     <!-- crisp low-res composite render target; only shown if WebGL is absent -->
     <canvas id="source"></canvas>
-
-    <!-- Minimal HTML overlay: text entry can't happen on a canvas. Shown only
-         in the lobby / between games. -->
-    <div id="lobby" class="lobby">
-      <div class="lobby-box">
-        <h1>MMO<span>TETRIS</span></h1>
-        <p id="lobby-msg">DROP INTO THE ROOM</p>
-        <label>PLAYER
-          <input id="player-name" maxlength="16" autocomplete="nickname" value="ANON" />
-        </label>
-        <label>START LEVEL
-          <input id="start-level" type="number" min="0" max="29" value="0" />
-        </label>
-        <button id="start" type="button">START</button>
-        <p class="lobby-status" id="status">CONNECTING…</p>
-        <p class="lobby-keys">← → MOVE&nbsp;&nbsp;·&nbsp;&nbsp;↓ SOFT DROP&nbsp;&nbsp;·&nbsp;&nbsp;X/↑ ROTATE A&nbsp;&nbsp;·&nbsp;&nbsp;Z ROTATE B</p>
-      </div>
-    </div>
 
     <script type="module" src="/app.js"></script>
   </body>

@@ -49,16 +49,31 @@ ctx.imageSmoothingEnabled = false;
 const glCanvas = document.querySelector("#game");
 let crt = null;
 
-// ---- lobby DOM (text entry can't live on a canvas) ----
-const lobby = document.querySelector("#lobby");
-const lobbyMsg = document.querySelector("#lobby-msg");
-const statusEl = document.querySelector("#status");
-const nameInput = document.querySelector("#player-name");
-const startLevelInput = document.querySelector("#start-level");
-const startBtn = document.querySelector("#start");
+// ---------------------------------------------------------------------------
+// Canvas lobby model. The lobby is no longer DOM — it is drawn into the
+// composite and shown through the CRT, with hover / pressed / focus states and
+// text entry handled manually (a real <input> can't live on a canvas). All
+// rects below are in virtual composite pixels; hit-testing maps a viewport
+// mouse position back into this space (see toVirtual()).
+// ---------------------------------------------------------------------------
+const lobbyUI = {
+  open: true, // shown in the lobby / between games
+  msg: "DROP INTO THE ROOM",
+  status: "CONNECTING…",
+  fields: {
+    name: { value: localStorage.getItem("mmo-tetris.player-name") || "ANON", caret: 0, max: 16 },
+    level: { value: localStorage.getItem("mmo-tetris.start-level") || "0", caret: 0, max: 2 },
+  },
+  focus: null, // "name" | "level" | null
+  hot: null, // currently hovered hot-zone id: "name" | "level" | "start" | null
+  pressed: null, // hot-zone being pressed (mouse down inside it)
+};
+lobbyUI.fields.name.caret = lobbyUI.fields.name.value.length;
+lobbyUI.fields.level.caret = lobbyUI.fields.level.value.length;
 
-nameInput.value = localStorage.getItem("mmo-tetris.player-name") || "ANON";
-startLevelInput.value = localStorage.getItem("mmo-tetris.start-level") || "0";
+// Clickable / focusable hot-zones, filled in by renderLobby() each frame so the
+// geometry that draws is exactly the geometry we hit-test against.
+let lobbyZones = [];
 
 // ---------------------------------------------------------------------------
 // Layout (virtual pixels). Mirrors the mockup.
@@ -401,6 +416,102 @@ function pad(n, len) { return String(Math.max(0, n | 0)).padStart(len, "0"); }
 function pad2(n) { return String(n).padStart(2, "0"); }
 
 // ---------------------------------------------------------------------------
+// canvas lobby — drawn into the composite so it goes through the CRT shader.
+// ---------------------------------------------------------------------------
+// A centred dialog with a title, two text fields and a START button. Each frame
+// it (re)publishes its hot-zones into lobbyZones so input handling tests against
+// the exact pixels that were drawn. Hover / focus / pressed state lives in
+// lobbyUI and is set by the pointer handlers.
+const LOBBY_BOX = { w: 300, h: 248 };
+
+// Draw one fake input field: a framed box with the value text and, when focused,
+// a blinking block caret at the edit position. Registers a "text" hot-zone.
+function drawField(id, label, field, x, y, w) {
+  const h = 22;
+  drawText(ctx, label, x, y - 11, 1, NES_WHITE);
+
+  const focused = lobbyUI.focus === id;
+  const hot = lobbyUI.hot === id;
+  // frame: cyan when focused, brighter white on hover, plain otherwise
+  ctx.fillStyle = "#000";
+  ctx.fillRect(x, y, w, h);
+  ctx.strokeStyle = focused ? NES_CYAN : hot ? NES_WHITE : "#9a9a9a";
+  ctx.lineWidth = 2;
+  ctx.strokeRect(x + 1, y + 1, w - 2, h - 2);
+
+  const tx = x + 6;
+  const ty = y + 8;
+  drawText(ctx, field.value, tx, ty, 1, NES_CYAN);
+  // blinking block caret while this field has focus
+  if (focused && Math.floor(performance.now() / 500) % 2 === 0) {
+    const cx = tx + textWidth(field.value.slice(0, field.caret), 1);
+    ctx.fillStyle = NES_WHITE;
+    ctx.fillRect(cx, ty - 1, 1, GLYPH_H + 2);
+  }
+  lobbyZones.push({ id, kind: "text", x, y, w, h });
+}
+
+function renderLobby() {
+  lobbyZones = [];
+  // dim the live scene behind the dialog so the lobby reads as the foreground
+  ctx.fillStyle = "rgba(0,0,0,0.72)";
+  ctx.fillRect(0, 0, VW, VH);
+
+  const bx = (VW - LOBBY_BOX.w) / 2;
+  const by = (VH - LOBBY_BOX.h) / 2;
+  // dialog frame (double border for the chunky NES look)
+  ctx.fillStyle = "#000";
+  ctx.fillRect(bx, by, LOBBY_BOX.w, LOBBY_BOX.h);
+  ctx.strokeStyle = NES_WHITE;
+  ctx.lineWidth = 2;
+  ctx.strokeRect(bx + 2, by + 2, LOBBY_BOX.w - 4, LOBBY_BOX.h - 4);
+
+  // title: MMO TETRIS with a cyan drop-shadow, like the old DOM h1
+  const title1 = "MMO", title2 = "TETRIS";
+  const tScale = 3;
+  const titleW = textWidth(title1 + " " + title2, tScale);
+  const tX = bx + (LOBBY_BOX.w - titleW) / 2;
+  const tY = by + 18;
+  drawText(ctx, title1, tX + 2, tY + 2, tScale, NES_CYAN); // shadow
+  drawText(ctx, title1, tX, tY, tScale, NES_WHITE);
+  const t2X = tX + textWidth(title1 + " ", tScale);
+  drawText(ctx, title2, t2X + 2, tY + 2, tScale, NES_WHITE); // shadow
+  drawText(ctx, title2, t2X, tY, tScale, NES_CYAN);
+
+  // message line
+  const msg = lobbyUI.msg;
+  drawText(ctx, msg, bx + (LOBBY_BOX.w - textWidth(msg, 1)) / 2, tY + 30, 1, NES_CYAN);
+
+  // fields
+  const fx = bx + 24;
+  const fw = LOBBY_BOX.w - 48;
+  drawField("name", "PLAYER", lobbyUI.fields.name, fx, by + 84, fw);
+  drawField("level", "START LEVEL", lobbyUI.fields.level, fx, by + 124, fw);
+
+  // START button with hover / pressed states
+  const bw = fw, bh = 30;
+  const bX = fx, bY = by + 156;
+  const pressed = lobbyUI.pressed === "start";
+  const hover = lobbyUI.hot === "start";
+  // pressed sinks 1px and dims; hover brightens to white; idle is cyan
+  const fill = pressed ? "#1c84b4" : hover ? NES_WHITE : NES_CYAN;
+  const oy = pressed ? 1 : 0;
+  ctx.fillStyle = "#000";
+  ctx.fillRect(bX, bY, bw, bh);
+  ctx.fillStyle = fill;
+  ctx.fillRect(bX + 2, bY + 2 + oy, bw - 4, bh - 4);
+  const bl = "START";
+  drawText(ctx, bl, bX + (bw - textWidth(bl, 2)) / 2, bY + (bh - GLYPH_H * 2) / 2 + oy, 2, "#000");
+  lobbyZones.push({ id: "start", kind: "button", x: bX, y: bY, w: bw, h: bh });
+
+  // status + controls help
+  const st = lobbyUI.status;
+  drawText(ctx, st, bx + (LOBBY_BOX.w - textWidth(st, 1)) / 2, bY + bh + 12, 1, NES_CYAN);
+  const keys = "ARROWS MOVE · X ROT A · Z ROT B";
+  drawText(ctx, keys, bx + (LOBBY_BOX.w - textWidth(keys, 1)) / 2, bY + bh + 26, 1, "#8a8a8a");
+}
+
+// ---------------------------------------------------------------------------
 // compose the whole frame
 // ---------------------------------------------------------------------------
 function renderScene() {
@@ -423,6 +534,8 @@ function renderScene() {
     const t = "GAME OVER";
     drawText(ctx, t, bx + (L.board.w - textWidth(t, 2)) / 2, by, 2, NES_RED);
   }
+
+  if (lobbyUI.open) renderLobby();
 }
 
 // ---------------------------------------------------------------------------
@@ -436,8 +549,8 @@ function currentInputBits() {
 
 function startGame() {
   seed = Math.floor(Math.random() * 0xffff) & 0xffff;
-  startLevel = clampLevel(parseInt(startLevelInput.value, 10) || 0);
-  myName = nameInput.value.trim().slice(0, 16) || "ANON";
+  startLevel = clampLevel(parseInt(lobbyUI.fields.level.value, 10) || 0);
+  myName = lobbyUI.fields.name.value.trim().slice(0, 16) || "ANON";
   localStorage.setItem("mmo-tetris.player-name", myName);
   localStorage.setItem("mmo-tetris.start-level", String(startLevel));
   state = createInitialState(seed, startLevel);
@@ -449,7 +562,8 @@ function startGame() {
   submitted = false;
   running = true;
   snapshotCounter = 0;
-  lobby.classList.add("hidden");
+  lobbyUI.open = false;
+  lobbyUI.focus = null;
   send({ type: "start" });
 }
 
@@ -458,9 +572,9 @@ function clampLevel(v) { return Math.max(0, Math.min(29, v | 0)); }
 function endGame() {
   running = false;
   submitPlay();
-  lobbyMsg.textContent = `GAME OVER — ${pad(state.score, 6)}`;
-  statusEl.textContent = "VERIFYING…";
-  lobby.classList.remove("hidden");
+  lobbyUI.msg = `GAME OVER — ${pad(state.score, 6)}`;
+  lobbyUI.status = "VERIFYING…";
+  lobbyUI.open = true;
 }
 
 function tickSimulation() {
@@ -520,10 +634,60 @@ document.addEventListener("visibilitychange", () => {
 // ---------------------------------------------------------------------------
 // input
 // ---------------------------------------------------------------------------
+// ---- text editing for the focused canvas field ----
+// A field accepts a restricted character set: names take A-Z/0-9/space, the
+// level takes digits only. We edit the in-memory string + caret directly; the
+// blinking caret and value are drawn by drawField().
+function editFocusedField(event) {
+  const field = lobbyUI.fields[lobbyUI.focus];
+  if (!field) return false;
+  const key = event.key;
+
+  if (key === "Backspace") {
+    if (field.caret > 0) {
+      field.value = field.value.slice(0, field.caret - 1) + field.value.slice(field.caret);
+      field.caret--;
+    }
+  } else if (key === "Delete") {
+    field.value = field.value.slice(0, field.caret) + field.value.slice(field.caret + 1);
+  } else if (key === "ArrowLeft") {
+    field.caret = Math.max(0, field.caret - 1);
+  } else if (key === "ArrowRight") {
+    field.caret = Math.min(field.value.length, field.caret + 1);
+  } else if (key === "Home") {
+    field.caret = 0;
+  } else if (key === "End") {
+    field.caret = field.value.length;
+  } else if (key === "Tab") {
+    // hop between the two fields
+    lobbyUI.focus = lobbyUI.focus === "name" ? "level" : "name";
+  } else if (key === "Enter") {
+    startGame();
+  } else if (key === "Escape") {
+    lobbyUI.focus = null;
+  } else if (key.length === 1 && field.value.length < field.max) {
+    // accept one printable char if it passes the field's filter
+    const ch = key.toUpperCase();
+    const ok = lobbyUI.focus === "level" ? /[0-9]/.test(ch) : /[A-Z0-9 ]/.test(ch);
+    if (ok) {
+      field.value = field.value.slice(0, field.caret) + ch + field.value.slice(field.caret);
+      field.caret++;
+    }
+  } else {
+    return false; // not consumed
+  }
+  event.preventDefault();
+  return true;
+}
+
 window.addEventListener("keydown", (event) => {
+  // Lobby text entry takes priority while a field is focused.
+  if (lobbyUI.open && lobbyUI.focus) {
+    if (editFocusedField(event)) return;
+  }
   if (event.repeat) return;
   if (event.key === "Enter") {
-    if (!running && document.activeElement?.tagName !== "INPUT") startGame();
+    if (!running) startGame();
     return;
   }
   const bit = KEY_BITS[event.key];
@@ -537,7 +701,66 @@ window.addEventListener("keyup", (event) => {
   if (bit !== undefined) { event.preventDefault(); heldBits.delete(bit); }
 });
 window.addEventListener("blur", () => heldBits.clear());
-startBtn.addEventListener("click", () => { if (!running) startGame(); });
+
+// ---- pointer input on the canvas lobby ----
+// Map a viewport mouse position into virtual composite pixels (inverse of the
+// CRT's tube/picture mapping), find the hot-zone under it, and drive hover /
+// focus / press / click. Returns the zone at (vx,vy), or null.
+function zoneAt(vx, vy) {
+  if (vx == null) return null;
+  for (const z of lobbyZones) {
+    if (vx >= z.x && vx <= z.x + z.w && vy >= z.y && vy <= z.y + z.h) return z;
+  }
+  return null;
+}
+
+// Place the caret in a text field at the click X (nearest character boundary).
+function caretFromX(field, zoneX, vx) {
+  const tx = zoneX + 6;
+  let best = 0, bestD = Infinity;
+  for (let i = 0; i <= field.value.length; i++) {
+    const cx = tx + textWidth(field.value.slice(0, i), 1);
+    const d = Math.abs(cx - vx);
+    if (d < bestD) { bestD = d; best = i; }
+  }
+  return best;
+}
+
+glCanvas.addEventListener("mousemove", (event) => {
+  if (!lobbyUI.open) { lobbyUI.hot = null; updateCursor(); return; }
+  const p = toVirtual(event.clientX, event.clientY);
+  const z = zoneAt(p?.x, p?.y);
+  lobbyUI.hot = z ? z.id : null;
+  updateCursor();
+});
+
+glCanvas.addEventListener("mousedown", (event) => {
+  if (!lobbyUI.open) return;
+  const p = toVirtual(event.clientX, event.clientY);
+  const z = zoneAt(p?.x, p?.y);
+  if (!z) { lobbyUI.focus = null; return; }
+  if (z.kind === "text") {
+    lobbyUI.focus = z.id;
+    lobbyUI.fields[z.id].caret = caretFromX(lobbyUI.fields[z.id], z.x, p.x);
+  } else if (z.kind === "button") {
+    lobbyUI.pressed = z.id;
+  }
+});
+
+window.addEventListener("mouseup", (event) => {
+  if (lobbyUI.pressed === "start") {
+    const p = toVirtual(event.clientX, event.clientY);
+    const z = zoneAt(p?.x, p?.y);
+    if (z && z.id === "start" && !running) startGame(); // released over the button
+  }
+  lobbyUI.pressed = null;
+});
+
+function updateCursor() {
+  glCanvas.classList.toggle("lobby-hover", lobbyUI.open && (lobbyUI.hot === "start"));
+  glCanvas.classList.toggle("lobby-text", lobbyUI.open &&
+    (lobbyUI.hot === "name" || lobbyUI.hot === "level"));
+}
 
 // ---------------------------------------------------------------------------
 // canvas sizing — keep the CRT crisp and full-viewport
@@ -563,6 +786,53 @@ function resize() {
   glCanvas.height = Math.max(1, Math.floor(vh * dpr));
 }
 window.addEventListener("resize", resize);
+
+// ---------------------------------------------------------------------------
+// inverse CRT mapping: viewport mouse px -> virtual composite px
+// ---------------------------------------------------------------------------
+// The shader maps each screen pixel through curve() to a tube coord, then into
+// a centred 4:3 picture, then samples the source. We hit-test by running that
+// SAME forward chain on the mouse position: screen uv -> tube uv -> picture uv
+// -> virtual px. Returns null when the click lands off the picture (the dark
+// curved tube border around the 4:3 image).
+const PICTURE_ASPECT = 4 / 3;
+
+// forward barrel curve, identical to crt.js curve(). Y is symmetric (abs), so
+// this is correct in DOM top-left space even though the shader works in WebGL's
+// bottom-left space — the source texture is Y-flipped at upload to match.
+function curveFwd(ux, uy) {
+  let x = ux * 2 - 1, y = uy * 2 - 1;
+  const offx = Math.abs(y) / 9.0;
+  const offy = Math.abs(x) / 7.0;
+  x = x + x * offx * offx;
+  y = y + y * offy * offy;
+  return [x * 0.5 + 0.5, y * 0.5 + 0.5];
+}
+
+function toVirtual(clientX, clientY) {
+  const rect = glCanvas.getBoundingClientRect();
+  // screen uv in [0,1], origin top-left (DOM space; the shader's Y flip is
+  // handled at texture upload, so picture space here is also top-left).
+  const sx = (clientX - rect.left) / rect.width;
+  const sy = (clientY - rect.top) / rect.height;
+  if (sx < 0 || sx > 1 || sy < 0 || sy > 1) return null;
+
+  // screen uv -> tube uv (same barrel the shader applies). In the WebGL-absent
+  // fallback the raw #source is shown with no curvature, so skip the curve.
+  const [tx, ty] = crt ? curveFwd(sx, sy) : [sx, sy];
+  if (tx < 0 || tx > 1 || ty < 0 || ty > 1) return null;
+
+  // tube uv -> picture uv (inverse of the picScale fit in crt.js render())
+  const outAspect = rect.width / rect.height;
+  let scaleX = 1, scaleY = 1;
+  if (outAspect > PICTURE_ASPECT) scaleX = PICTURE_ASPECT / outAspect;
+  else scaleY = outAspect / PICTURE_ASPECT;
+  const px = (tx - 0.5) / scaleX + 0.5;
+  const py = (ty - 0.5) / scaleY + 0.5;
+  if (px < 0 || px > 1 || py < 0 || py > 1) return null;
+
+  return { x: px * VW, y: py * VH };
+}
 
 // ---------------------------------------------------------------------------
 // networking
@@ -613,19 +883,19 @@ function connect() {
   endpoint.pathname = "/ws";
   endpoint.search = "";
   socket = new WebSocket(endpoint);
-  statusEl.textContent = "CONNECTING…";
+  lobbyUI.status = "CONNECTING…";
 
   socket.addEventListener("open", () => {
-    const name = nameInput.value.trim().slice(0, 16) || "ANON";
+    const name = lobbyUI.fields.name.value.trim().slice(0, 16) || "ANON";
     send({ type: "hello", name });
-    statusEl.textContent = "● ONLINE";
+    lobbyUI.status = "● ONLINE";
   });
   socket.addEventListener("message", (event) => {
     let m; try { m = JSON.parse(event.data); } catch { return; }
     handleMessage(m);
   });
   socket.addEventListener("close", () => {
-    statusEl.textContent = "RECONNECTING…";
+    lobbyUI.status = "RECONNECTING…";
     reconnectTimer = setTimeout(connect, 1500);
   });
 }
@@ -646,7 +916,7 @@ function handleMessage(m) {
       if (m.position !== undefined) myPosition = m.position;
       break;
     case "play_accepted":
-      statusEl.textContent = `✓ VERIFIED ${pad(m.score, 6)}`;
+      lobbyUI.status = `✓ VERIFIED ${pad(m.score, 6)}`;
       break;
     case "play_rejected":
       // The score was blocked server-side; respond with an escalating troll.
@@ -658,7 +928,7 @@ function handleMessage(m) {
       troll(m.severity ?? 2, m.reason || "tamper");
       break;
     case "error":
-      statusEl.textContent = String(m.error || "error").toUpperCase();
+      lobbyUI.status = String(m.error || "error").toUpperCase();
       break;
   }
 }
@@ -728,7 +998,7 @@ function troll(severity, reason) {
   if (sev >= 2) pinkUntil = Math.max(pinkUntil, now + 6000);
   if (sev >= 3) flipUntil = Math.max(flipUntil, now + 4000);
   applyTrollVisuals();
-  if (reason) statusEl.textContent = `✕ BLOCKED — ${String(reason).toUpperCase()}`;
+  if (reason) lobbyUI.status = `✕ BLOCKED — ${String(reason).toUpperCase()}`;
 }
 
 // Keep the canvas classes in sync as the troll timers wind down.
@@ -804,6 +1074,6 @@ function buildFont() {
 resize();
 crt = createCrt(glCanvas, source);
 if (!crt) source.classList.add("visible-fallback");
-lobbyMsg.textContent = "DROP INTO THE ROOM";
+lobbyUI.msg = "DROP INTO THE ROOM";
 connect();
 requestAnimationFrame(frame);
