@@ -31,6 +31,7 @@ import {
   MAX_REPLAY_FRAMES,
 } from "./nes-engine.js";
 import { createCrt } from "./crt.js";
+import { createMenu } from "./menu.js";
 
 // ---------------------------------------------------------------------------
 // Virtual composite screen. Low-res so it reads as NES pixel art; the CRT and
@@ -416,13 +417,21 @@ function pad(n, len) { return String(Math.max(0, n | 0)).padStart(len, "0"); }
 function pad2(n) { return String(n).padStart(2, "0"); }
 
 // ---------------------------------------------------------------------------
-// canvas lobby — drawn into the composite so it goes through the CRT shader.
+// canvas lobby — the EVENT HORIZON main menu, drawn into the composite so it
+// goes through the CRT shader.
 // ---------------------------------------------------------------------------
-// A centred dialog with a title, two text fields and a START button. Each frame
-// it (re)publishes its hot-zones into lobbyZones so input handling tests against
-// the exact pixels that were drawn. Hover / focus / pressed state lives in
-// lobbyUI and is set by the pointer handlers.
-const LOBBY_BOX = { w: 300, h: 248 };
+// The menu scene (black hole + accretion disk + tetromino debris + HUD panels +
+// glitch title) is rendered by menu.js into the same #source canvas. On top of
+// the lower part of the scene we overlay a compact control console: the two
+// text fields and a START button. Each frame the overlay (re)publishes its
+// hot-zones into lobbyZones so input handling tests against the exact pixels
+// that were drawn. Hover / focus / pressed state lives in lobbyUI.
+const menu = createMenu({
+  w: VW,
+  h: VH,
+  toolkit: { drawText, textWidth, drawBlock, GLYPH_H },
+});
+let menuClock = performance.now();
 
 // Draw one fake input field: a framed box with the value text and, when focused,
 // a blinking block caret at the edit position. Registers a "text" hot-zone.
@@ -453,47 +462,61 @@ function drawField(id, label, field, x, y, w) {
 
 function renderLobby() {
   lobbyZones = [];
-  // dim the live scene behind the dialog so the lobby reads as the foreground
-  ctx.fillStyle = "rgba(0,0,0,0.72)";
-  ctx.fillRect(0, 0, VW, VH);
 
-  const bx = (VW - LOBBY_BOX.w) / 2;
-  const by = (VH - LOBBY_BOX.h) / 2;
-  // dialog frame (double border for the chunky NES look)
-  ctx.fillStyle = "#000";
-  ctx.fillRect(bx, by, LOBBY_BOX.w, LOBBY_BOX.h);
+  // 1) the full Event Horizon scene as the backdrop
+  const now = performance.now();
+  const t = now / 1000;
+  const dt = Math.min(0.05, (now - menuClock) / 1000);
+  menuClock = now;
+  menu.render(ctx, t, dt, { entries: leaderboard });
+
+  // The control console fades in only after the boot sequence hands over to the
+  // live scene, so the diagnostics screen isn't covered. While it's hidden we
+  // also skip publishing its hot-zones (no clicking START mid-boot).
+  const reveal = menu.consoleReveal(t);
+  if (reveal <= 0.01) { ctx.globalAlpha = 1; return; }
+
+  // 2) the control console, anchored in the LOWER part of the well so the
+  // black hole (raised into the upper well) reads clearly above it. A framed
+  // panel holding the message, two fields, START, a status line and the
+  // controls hint, with a consistent vertical rhythm so nothing is cramped.
+  const { MAIN_X, MAIN_Y, wellW, MAIN_H } = menu.layout;
+  const consoleW = Math.min(wellW - 18, 286);
+  const consoleX = MAIN_X + (wellW - consoleW) / 2;
+  const consoleH = 162;
+  const consoleY = MAIN_Y + MAIN_H - consoleH - 6;
+
+  ctx.globalAlpha = reveal;
+
+  // a darkened, framed console so the controls read over the busy scene
+  ctx.fillStyle = "rgba(0,0,0,0.82)";
+  ctx.fillRect(consoleX, consoleY, consoleW, consoleH);
   ctx.strokeStyle = NES_WHITE;
   ctx.lineWidth = 2;
-  ctx.strokeRect(bx + 2, by + 2, LOBBY_BOX.w - 4, LOBBY_BOX.h - 4);
+  ctx.strokeRect(consoleX + 1, consoleY + 1, consoleW - 2, consoleH - 2);
+  // a hairline cyan inset under the title for a "panel header" feel
+  ctx.fillStyle = NES_CYAN;
+  ctx.globalAlpha = reveal * 0.5;
+  ctx.fillRect(consoleX + 8, consoleY + 18, consoleW - 16, 1);
+  ctx.globalAlpha = reveal;
 
-  // title: MMO TETRIS with a cyan drop-shadow, like the old DOM h1
-  const title1 = "MMO", title2 = "TETRIS";
-  const tScale = 3;
-  const titleW = textWidth(title1 + " " + title2, tScale);
-  const tX = bx + (LOBBY_BOX.w - titleW) / 2;
-  const tY = by + 18;
-  drawText(ctx, title1, tX + 2, tY + 2, tScale, NES_CYAN); // shadow
-  drawText(ctx, title1, tX, tY, tScale, NES_WHITE);
-  const t2X = tX + textWidth(title1 + " ", tScale);
-  drawText(ctx, title2, t2X + 2, tY + 2, tScale, NES_WHITE); // shadow
-  drawText(ctx, title2, t2X, tY, tScale, NES_CYAN);
+  const fx = consoleX + 18;
+  const fw = consoleW - 36;
 
-  // message line
+  // message line — the console header
   const msg = lobbyUI.msg;
-  drawText(ctx, msg, bx + (LOBBY_BOX.w - textWidth(msg, 1)) / 2, tY + 30, 1, NES_CYAN);
+  drawText(ctx, msg, consoleX + (consoleW - textWidth(msg, 1)) / 2, consoleY + 7, 1, NES_CYAN);
 
-  // fields
-  const fx = bx + 24;
-  const fw = LOBBY_BOX.w - 48;
-  drawField("name", "PLAYER", lobbyUI.fields.name, fx, by + 84, fw);
-  drawField("level", "START LEVEL", lobbyUI.fields.level, fx, by + 124, fw);
+  // fields (label sits 11px above each box; boxes are 22px tall)
+  drawField("name", "PLAYER", lobbyUI.fields.name, fx, consoleY + 38, fw);
+  drawField("level", "START LEVEL", lobbyUI.fields.level, fx, consoleY + 76, fw);
 
   // START button with hover / pressed states
-  const bw = fw, bh = 30;
-  const bX = fx, bY = by + 156;
+  const bw = fw, bh = 24;
+  const bX = fx, bY = consoleY + 104;
   const pressed = lobbyUI.pressed === "start";
   const hover = lobbyUI.hot === "start";
-  // pressed sinks 1px and dims; hover brightens to white; idle is cyan
+  // sinks 1px and dims when pressed; brightens to white on hover; cyan idle
   const fill = pressed ? "#1c84b4" : hover ? NES_WHITE : NES_CYAN;
   const oy = pressed ? 1 : 0;
   ctx.fillStyle = "#000";
@@ -504,11 +527,24 @@ function renderLobby() {
   drawText(ctx, bl, bX + (bw - textWidth(bl, 2)) / 2, bY + (bh - GLYPH_H * 2) / 2 + oy, 2, "#000");
   lobbyZones.push({ id: "start", kind: "button", x: bX, y: bY, w: bw, h: bh });
 
-  // status + controls help
-  const st = lobbyUI.status;
-  drawText(ctx, st, bx + (LOBBY_BOX.w - textWidth(st, 1)) / 2, bY + bh + 12, 1, NES_CYAN);
+  // status line (with a drawn status dot, since the ● glyph isn't in the bitmap
+  // font) then the controls hint — evenly spaced below START with a clear
+  // bottom margin so neither line crowds the border.
+  const cx = consoleX + consoleW / 2;
+  const st = String(lobbyUI.status || "").replace(/^[●•]\s*/, "").trim();
+  const stW = textWidth(st, 1);
+  const dotW = 8; // dot (3px) + clear gap before the text
+  const stStart = Math.round(cx - (stW + dotW) / 2);
+  const stY = bY + bh + 10;
+  // a small connection dot, green when online, cyan otherwise
+  const online = /ONLINE/i.test(st);
+  ctx.fillStyle = online ? "#58f898" : NES_CYAN;
+  ctx.fillRect(stStart, stY + 1, 3, 4);
+  drawText(ctx, st, stStart + dotW, stY, 1, NES_CYAN);
   const keys = "ARROWS MOVE · X ROT A · Z ROT B";
-  drawText(ctx, keys, bx + (LOBBY_BOX.w - textWidth(keys, 1)) / 2, bY + bh + 26, 1, "#8a8a8a");
+  drawText(ctx, keys, Math.round(cx - textWidth(keys, 1) / 2), bY + bh + 22, 1, "#8a8a8a");
+
+  ctx.globalAlpha = 1;
 }
 
 // ---------------------------------------------------------------------------
@@ -564,7 +600,9 @@ function startGame() {
   snapshotCounter = 0;
   lobbyUI.open = false;
   lobbyUI.focus = null;
-  send({ type: "start" });
+  // Send the (possibly edited) name with the start so the server records THIS
+  // game under the current name, not whatever was sent at connect time.
+  send({ type: "start", name: myName });
 }
 
 function clampLevel(v) { return Math.max(0, Math.min(29, v | 0)); }
@@ -680,7 +718,13 @@ function editFocusedField(event) {
   return true;
 }
 
+// Any interaction while the menu is up defers its idle attract-reboot.
+function pokeMenu() {
+  if (lobbyUI.open) menu.pokeActivity(performance.now() / 1000);
+}
+
 window.addEventListener("keydown", (event) => {
+  pokeMenu();
   // Lobby text entry takes priority while a field is focused.
   if (lobbyUI.open && lobbyUI.focus) {
     if (editFocusedField(event)) return;
@@ -728,6 +772,7 @@ function caretFromX(field, zoneX, vx) {
 
 glCanvas.addEventListener("mousemove", (event) => {
   if (!lobbyUI.open) { lobbyUI.hot = null; updateCursor(); return; }
+  pokeMenu();
   const p = toVirtual(event.clientX, event.clientY);
   const z = zoneAt(p?.x, p?.y);
   lobbyUI.hot = z ? z.id : null;
@@ -736,6 +781,7 @@ glCanvas.addEventListener("mousemove", (event) => {
 
 glCanvas.addEventListener("mousedown", (event) => {
   if (!lobbyUI.open) return;
+  pokeMenu();
   const p = toVirtual(event.clientX, event.clientY);
   const z = zoneAt(p?.x, p?.y);
   if (!z) { lobbyUI.focus = null; return; }

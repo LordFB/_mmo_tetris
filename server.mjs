@@ -315,6 +315,10 @@ export function createServer({
         }
 
         case "start": {
+          // The name may have been edited in the lobby since "hello"; adopt it
+          // so this game is recorded under the current name. Older clients omit
+          // it, in which case the connect-time name stands.
+          if (message.name !== undefined) socket.playerName = cleanName(message.name);
           socket.liveScore = 0;
           socket.snapshot = null;
           pushNeighbours();

@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "start": "node server.mjs",
-    "test": "node --test"
+    "test": "node --test",
+    "train": "node scripts/train.mjs"
   },
   "dependencies": {
     "better-sqlite3": "^12.4.1",
