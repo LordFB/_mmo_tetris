@@ -43,6 +43,46 @@ uniform vec2 u_srcRes;     // source resolution (px) -> scanline count
 uniform float u_time;
 uniform vec2 u_picScale;   // picture half-extent within the tube ([0..1] each axis)
 
+// ---------------------------------------------------------------------------
+// CRT brightness / calibration model.
+//
+// A real tube does NOT lose brightness the way a naive "multiply by scanline,
+// multiply by mask, multiply by vignette" shader does. Three things must hold
+// for the picture to read at a realistic luminance:
+//
+//  1. GAMMA / EOTF. The source is gamma-encoded (sRGB-ish). A CRT's gun has a
+//     native power-law response (~2.4) — that is literally where "gamma" comes
+//     from. Beam and mask attenuation must happen in LINEAR light, then the
+//     result is re-encoded, or midtones get crushed and the image looks muddy.
+//
+//  2. ENERGY CONSERVATION. Scanlines redistribute a fixed amount of beam energy
+//     into a bright centre and dark gaps; they don't delete it. We normalise the
+//     scanline profile so its AVERAGE over a line is ~1.0 (a gain term offsets
+//     the dark gaps) instead of just darkening everything.
+//
+//  3. MASK GAIN COMPENSATION. A shadow-mask / aperture-grille blocks 30-40% of
+//     the beam, but tubes are calibrated with extra gun current so full white
+//     still reaches the rated luminance. We divide the picture back up by the
+//     mask's average transmission so the mask adds texture without dimming.
+//
+// On top of that a master GAIN + soft-knee tone-map gives highlights somewhere
+// to bloom instead of clipping flat. Tunable constants, calibrated to a bright
+// consumer set viewed in a dim room.
+// ---------------------------------------------------------------------------
+const float CRT_GAMMA   = 2.4;   // tube EOTF exponent
+const float OUT_GAMMA   = 2.2;   // sRGB-ish re-encode
+const float MASTER_GAIN = 1.55;  // overall brightness lift (post energy/mask comp)
+const float BLACK_LIFT  = 0.018; // CRT black is a lifted dark gray
+
+vec3 toLinear(vec3 c) { return pow(max(c, 0.0), vec3(CRT_GAMMA)); }
+vec3 toGamma(vec3 c)  { return pow(max(c, 0.0), vec3(1.0 / OUT_GAMMA)); }
+
+// Reinhard-style soft knee so values pushed past 1.0 by gain/mask/bloom roll
+// off into a highlight instead of clipping to a flat plane.
+vec3 tonemap(vec3 c) {
+  return c / (1.0 + max(c - 0.7, 0.0));
+}
+
 // Barrel curvature of the virtual tube.
 vec2 curve(vec2 uv) {
   uv = uv * 2.0 - 1.0;
@@ -95,6 +135,7 @@ void main() {
   bool hasPic = inPicture(pic);
 
   vec3 col = vec3(0.0);
+  vec3 glowLin = vec3(0.0);
   if (hasPic) {
     // Beam convergence error: sample R/G/B at slightly different offsets,
     // growing toward the edges of the picture.
@@ -104,35 +145,54 @@ void main() {
     col.g = ntsc(pic).g;
     col.b = ntsc(pic - conv).b;
 
-    // Bloom / phosphor glow: blur a small neighbourhood, add the bright part.
+    // Work in LINEAR light from here on so beam/mask attenuation matches how a
+    // real tube responds (and midtones don't get crushed).
+    col = toLinear(col);
+
+    // Bloom / phosphor glow sampled and accumulated in linear light too, so the
+    // halo around bright pixels has physically-plausible energy.
     vec2 bpx = 1.6 / u_res;
-    vec3 glow = vec3(0.0);
-    glow += texture2D(u_src, pic + vec2( bpx.x, 0.0)).rgb;
-    glow += texture2D(u_src, pic + vec2(-bpx.x, 0.0)).rgb;
-    glow += texture2D(u_src, pic + vec2(0.0,  bpx.y)).rgb;
-    glow += texture2D(u_src, pic + vec2(0.0, -bpx.y)).rgb;
-    glow += texture2D(u_src, pic + bpx).rgb;
-    glow += texture2D(u_src, pic - bpx).rgb;
-    glow *= 1.0 / 6.0;
-    col += max(glow - 0.32, 0.0) * 0.55;
+    glowLin += toLinear(texture2D(u_src, pic + vec2( bpx.x, 0.0)).rgb);
+    glowLin += toLinear(texture2D(u_src, pic + vec2(-bpx.x, 0.0)).rgb);
+    glowLin += toLinear(texture2D(u_src, pic + vec2(0.0,  bpx.y)).rgb);
+    glowLin += toLinear(texture2D(u_src, pic + vec2(0.0, -bpx.y)).rgb);
+    glowLin += toLinear(texture2D(u_src, pic + bpx).rgb);
+    glowLin += toLinear(texture2D(u_src, pic - bpx).rgb);
+    glowLin *= 1.0 / 6.0;
   }
 
-  // Scanlines with a gaussian beam profile, locked to source rows across the
-  // WHOLE tube (so the letterbox area is clearly part of the same screen).
+  // --- Scanlines, energy-conserving. A gaussian beam profile locked to source
+  // rows, but NORMALISED so its average over a line-pair is ~1.0: the bright
+  // centre is boosted to pay back what the dark gaps remove, instead of just
+  // dimming the whole picture. ---
   float line = fract(uv.y * u_srcRes.y);
   float d = line - 0.5;
-  float beam = exp(-d * d * 9.0);        // bright at the beam center
-  col *= mix(0.55, 1.18, beam);          // dark gaps between scanlines
+  float beam = exp(-d * d * 9.0);
+  // mean of exp(-d^2*9) over d in [-0.5,0.5] is ~0.585; divide by it so the
+  // line-averaged gain is 1.0 (energy conserved), then shape contrast a touch.
+  float scan = mix(0.75, 1.0, beam) / 0.875;
+  col *= scan;
 
-  // Aperture-grille mask: R/G/B vertical phosphor stripes over output columns,
-  // with a faint horizontal gap every few rows (shadow-mask feel).
+  // --- Aperture-grille mask with GAIN COMPENSATION. The stripes attenuate, but
+  // we divide the picture back up by the mask's average transmission so full
+  // white still reaches full luminance (as a calibrated tube would). ---
   float mx = mod(gl_FragCoord.x, 3.0);
-  vec3 mask = mx < 1.0 ? vec3(1.08, 0.82, 0.82)
-            : mx < 2.0 ? vec3(0.82, 1.08, 0.82)
-                       : vec3(0.82, 0.82, 1.08);
+  vec3 mask = mx < 1.0 ? vec3(1.0, 0.70, 0.70)
+            : mx < 2.0 ? vec3(0.70, 1.0, 0.70)
+                       : vec3(0.70, 0.70, 1.0);
   float my = step(0.5, fract(gl_FragCoord.y / 3.0));
-  mask *= mix(0.92, 1.0, my);
-  col *= mask;
+  mask *= mix(0.90, 1.0, my);
+  // average transmission of the mask ~ (1.0+0.70+0.70)/3 * 0.95 ~ 0.76; renormalise
+  col *= mask / 0.76;
+
+  // --- Master gain, then add bloom, then tone-map so highlights roll off into a
+  // glow instead of clipping flat. All in linear light. ---
+  col *= MASTER_GAIN;
+  col += max(glowLin - 0.30, 0.0) * 0.85; // additive phosphor bloom
+  col = tonemap(col);
+
+  // Back to display gamma.
+  col = toGamma(col);
 
   // Phosphor persistence: blend a little of the previous output (afterglow).
   // Persistence is stronger on the green channel, like real P22 phosphors.
@@ -140,15 +200,16 @@ void main() {
   vec3 persist = vec3(0.10, 0.16, 0.10);
   col = max(col, prev * persist);
 
-  // Vignette + corner darkening.
-  float vig = 1.0 - dot(v_uv - 0.5, v_uv - 0.5) * 0.9;
+  // Vignette + corner darkening — gentle, so it shades the edges without
+  // dimming the centre (the old 0.9 falloff ate a lot of overall brightness).
+  float vig = 1.0 - dot(v_uv - 0.5, v_uv - 0.5) * 0.45;
   col *= clamp(vig, 0.0, 1.0);
 
   // Faint 60Hz-ish brightness hum / flicker.
-  col *= 0.985 + 0.015 * sin(u_time * 9.0 + uv.y * 5.0);
+  col *= 0.99 + 0.01 * sin(u_time * 9.0 + uv.y * 5.0);
 
-  // Tube black is a dark gray, not pure black.
-  col = max(col, vec3(0.012));
+  // Tube black is a lifted dark gray, not pure black.
+  col = max(col, vec3(BLACK_LIFT));
 
   gl_FragColor = vec4(col, 1.0);
 }`;
