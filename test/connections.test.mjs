@@ -113,6 +113,42 @@ test("rejects a forged score whose inputs do not produce it", async (context) =>
   });
 });
 
+test("clamps a forged live snapshot score before it reaches the leaderboard", async (context) => {
+  await withServer(context, async (port) => {
+    const a = await open(port);
+    a.send(JSON.stringify({ type: "hello", name: "FORGER" }));
+    await waitFor(a, "welcome");
+    a.send(JSON.stringify({ type: "start" }));
+
+    const board = new Array(200).fill(0);
+    board[199] = 1; // one locked cell so the snapshot shape is valid
+    // A tampered client claims an absurd live score. Number("1e308")||0 would
+    // have let this through and pinned FORGER at #1 on everyone's board; the
+    // server must clamp score/lines/level to sane caps before broadcasting.
+    a.send(JSON.stringify({
+      type: "snapshot",
+      board,
+      score: 1e308,    // -> Infinity under naive coercion
+      lines: -5,       // negative
+      level: 99999,    // wildly out of range
+      gameOver: false,
+    }));
+
+    let entry;
+    for (let tries = 0; tries < 5; tries++) {
+      const lb = await waitFor(a, "leaderboard");
+      entry = lb.entries.find((e) => e.name === "FORGER");
+      if (entry) break;
+    }
+    assert.ok(entry, "FORGER should still appear (live, just clamped)");
+    assert.equal(entry.score, 999999, "score clamped to MAX_SCORE");
+    assert.ok(Number.isFinite(entry.score), "score must be finite (no Infinity)");
+    assert.equal(entry.lines, 0, "negative lines clamped to 0");
+    assert.equal(entry.level, 99, "level clamped to MAX_LEVEL");
+    a.close();
+  });
+});
+
 test("tracks presence as players join and leave", async (context) => {
   await withServer(context, async (port) => {
     const a = await open(port);

@@ -23,6 +23,24 @@ function cleanName(value) {
     : "ANON";
 }
 
+// Coerce a client-supplied number to a bounded non-negative integer. Snapshot
+// fields (score/lines/level) are DISPLAY-ONLY but they fan out to every client's
+// live leaderboard, so an unbounded value (e.g. 1e308 -> Infinity, NaN, or a
+// negative) from a tampered client would otherwise corrupt the shared view and
+// break the sort comparator. `Number(x) || 0` did NOT catch those. Clamp here,
+// at the trust boundary, the same way snapshot board cells are validated.
+function boundedInt(value, max) {
+  const n = Math.floor(Number(value));
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  return n > max ? max : n;
+}
+// Real NES Tetris caps: score field is 6 digits, line counter rolls at 1000,
+// levels stop mattering past 29 but allow head-room. Anything past these from a
+// "live" snapshot is forged, so we clamp rather than trust it.
+const MAX_SCORE = 999_999;
+const MAX_LINES = 9_999;
+const MAX_LEVEL = 99;
+
 /**
  * Anti-cheat: re-simulate the submitted replay with the shared NES engine and
  * derive the authoritative score. The client's claimed numbers are never
@@ -353,9 +371,9 @@ export function createServer({
           socket.snapshot = {
             frame,
             board: Array.from(board),
-            score: Number(message.score) || 0,
-            lines: Number(message.lines) || 0,
-            level: Number(message.level) || 0,
+            score: boundedInt(message.score, MAX_SCORE),
+            lines: boundedInt(message.lines, MAX_LINES),
+            level: boundedInt(message.level, MAX_LEVEL),
             gameOver: Boolean(message.gameOver),
           };
           socket.liveScore = socket.snapshot.score;
