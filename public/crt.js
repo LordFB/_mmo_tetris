@@ -38,7 +38,7 @@ precision highp float;
 varying vec2 v_uv;
 uniform sampler2D u_src;   // crisp NES composite (this frame)
 uniform sampler2D u_prev;  // previous CRT output (for phosphor persistence)
-uniform vec2 u_res;        // output resolution (px)
+uniform vec2 u_res;        // CRT internal render resolution (px) — fixed, NOT the display
 uniform vec2 u_srcRes;     // source resolution (px) -> scanline count
 uniform float u_time;
 uniform vec2 u_picScale;   // picture half-extent within the tube ([0..1] each axis)
@@ -176,11 +176,16 @@ void main() {
   // --- Aperture-grille mask with GAIN COMPENSATION. The stripes attenuate, but
   // we divide the picture back up by the mask's average transmission so full
   // white still reaches full luminance (as a calibrated tube would). ---
-  float mx = mod(gl_FragCoord.x, 3.0);
+  // Keyed to the FIXED internal render grid (v_uv * u_res), NOT to gl_FragCoord /
+  // physical device pixels, so the triad pitch is identical on every display
+  // regardless of resolution or devicePixelRatio. The final upscale to the real
+  // screen is a separate bilinear blit (the present pass).
+  vec2 grid = v_uv * u_res;
+  float mx = mod(grid.x, 3.0);
   vec3 mask = mx < 1.0 ? vec3(1.0, 0.70, 0.70)
             : mx < 2.0 ? vec3(0.70, 1.0, 0.70)
                        : vec3(0.70, 0.70, 1.0);
-  float my = step(0.5, fract(gl_FragCoord.y / 3.0));
+  float my = step(0.5, fract(grid.y / 3.0));
   mask *= mix(0.90, 1.0, my);
   // average transmission of the mask ~ (1.0+0.70+0.70)/3 * 0.95 ~ 0.76; renormalise
   col *= mask / 0.76;
@@ -262,6 +267,20 @@ function makeTarget(gl, w, h) {
   return { tex, fbo, w, h };
 }
 
+// Fixed internal render height for the CRT pass. ALL tube optics (phosphor mask
+// pitch, scanline sampling, bloom radius) are computed against this grid, so the
+// look is byte-for-byte deterministic across machines — independent of the
+// display resolution and devicePixelRatio. The width tracks the screen aspect
+// (snapped to whole pixels) so the tube still fills any monitor without
+// stretching, but the per-row pixel density — and therefore the mask/scanline
+// pattern — is identical everywhere. The real display only ever sees the cheap
+// bilinear upscale done by the present pass.
+const CRT_INTERNAL_H = 720;
+// Clamp the internal aspect so an extreme ultrawide/portrait window can't blow
+// the internal width up to thousands of px (cost) or collapse it to nothing.
+const CRT_MIN_ASPECT = 1.0;
+const CRT_MAX_ASPECT = 3.0;
+
 export function createCrt(glCanvas, source) {
   const gl =
     glCanvas.getContext("webgl", { antialias: false, premultipliedAlpha: false }) ||
@@ -294,15 +313,28 @@ export function createCrt(glCanvas, source) {
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
 
-  // ping-pong targets for persistence; (re)created on resize.
+  // Fixed internal render size, derived only from the canvas ASPECT (not its
+  // pixel count). Height is constant; width tracks the aspect within sane bounds.
+  // This is what every tube-optics calculation runs against, so two machines
+  // showing the same-shaped window get a pixel-identical CRT image — the display
+  // resolution / dpr only changes the final upscale, never the look.
+  function internalSize() {
+    const w = Math.max(1, glCanvas.width);
+    const h = Math.max(1, glCanvas.height);
+    let aspect = w / h;
+    if (!(aspect > 0) || !isFinite(aspect)) aspect = 4 / 3;
+    aspect = Math.min(CRT_MAX_ASPECT, Math.max(CRT_MIN_ASPECT, aspect));
+    const iw = Math.max(1, Math.round(CRT_INTERNAL_H * aspect));
+    return { iw, ih: CRT_INTERNAL_H };
+  }
+
+  // ping-pong targets for persistence; (re)created when the internal size changes.
   let targets = null;
   let tw = 0, th = 0;
-  function ensureTargets() {
-    const w = glCanvas.width;
-    const h = glCanvas.height;
-    if (targets && tw === w && th === h) return;
-    targets = [makeTarget(gl, w, h), makeTarget(gl, w, h)];
-    tw = w; th = h;
+  function ensureTargets(iw, ih) {
+    if (targets && tw === iw && th === ih) return;
+    targets = [makeTarget(gl, iw, ih), makeTarget(gl, iw, ih)];
+    tw = iw; th = ih;
   }
   let cur = 0;
 
@@ -321,8 +353,8 @@ export function createCrt(glCanvas, source) {
 
   return {
     render(time) {
-      ensureTargets();
-      const w = glCanvas.width, h = glCanvas.height;
+      const { iw, ih } = internalSize();
+      ensureTargets(iw, ih);
       const prev = targets[cur];
       const next = targets[cur ^ 1];
 
@@ -334,9 +366,11 @@ export function createCrt(glCanvas, source) {
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
       gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
 
-      // --- pass A: CRT into `next`, reading `prev` for persistence ---
+      // --- pass A: CRT into `next` at the FIXED internal resolution, reading
+      // `prev` for persistence. The viewport, u_res and the mask grid are all the
+      // fixed internal size, so this stage is identical on every machine. ---
       gl.bindFramebuffer(gl.FRAMEBUFFER, next.fbo);
-      gl.viewport(0, 0, w, h);
+      gl.viewport(0, 0, iw, ih);
       gl.useProgram(crtProg);
       gl.bindBuffer(gl.ARRAY_BUFFER, buf);
       bindAttrib(crtProg);
@@ -346,19 +380,24 @@ export function createCrt(glCanvas, source) {
       gl.activeTexture(gl.TEXTURE1);
       gl.bindTexture(gl.TEXTURE_2D, prev.tex);
       gl.uniform1i(uCrt.prev, 1);
-      gl.uniform2f(uCrt.res, w, h);
+      gl.uniform2f(uCrt.res, iw, ih);
       gl.uniform2f(uCrt.srcRes, source.width, source.height);
       gl.uniform1f(uCrt.time, time);
-      // Fit a 4:3 picture inside the output: scale down the longer axis so the
+      // Fit a 4:3 picture inside the tube: scale down the longer axis so the
       // picture keeps its aspect and is centred, with the rest as dark tube.
-      const outAspect = w / h;
+      // Driven by the internal aspect (iw/ih), which mirrors the screen aspect.
+      const outAspect = iw / ih;
       let sx = 1, sy = 1;
       if (outAspect > PICTURE_ASPECT) sx = PICTURE_ASPECT / outAspect; // wide: bars L/R
       else sy = outAspect / PICTURE_ASPECT; // tall: bars top/bottom
       gl.uniform2f(uCrt.picScale, sx, sy);
       gl.drawArrays(gl.TRIANGLES, 0, 6);
 
-      // --- pass B: present `next` to the screen ---
+      // --- pass B: present `next` to the screen, bilinear-upscaling the fixed
+      // internal image to whatever physical resolution the display uses. This is
+      // the ONLY place the real pixel count enters, and a bilinear blit is
+      // well-defined everywhere. ---
+      const w = glCanvas.width, h = glCanvas.height;
       gl.bindFramebuffer(gl.FRAMEBUFFER, null);
       gl.viewport(0, 0, w, h);
       gl.useProgram(copyProg);

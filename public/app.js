@@ -827,6 +827,11 @@ function resize() {
   glCanvas.style.width = vw + "px";
   glCanvas.style.height = vh + "px";
 
+  // The backing-store size only governs how sharply the final image is presented
+  // (the CRT itself renders at a FIXED internal resolution inside crt.js, so the
+  // tube look is identical on every machine regardless of dpr). We still honour
+  // devicePixelRatio here so the upscaled blit stays crisp on HiDPI displays,
+  // capped at 2x to bound GPU cost. crt.js reads only the ASPECT of this canvas.
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
   glCanvas.width = Math.max(1, Math.floor(vw * dpr));
   glCanvas.height = Math.max(1, Math.floor(vh * dpr));

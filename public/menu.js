@@ -341,6 +341,16 @@ export function createMenu({ w, h, toolkit }) {
   // VOID "consumed" count and used to occasionally clear a "line".
   let consumed = 0;
   let linesCleared = 0;
+  // 0..1 surge pumped to 1 each time the hole swallows a piece, then decaying.
+  // Drives the VOID panel's flare so the mini-hole reacts to real consumption.
+  let voidFlash = 0;
+
+  // Live contacts for the THREAT radar, refreshed each frame by drawScene's
+  // debris loop and consumed by the THREAT panel in drawHud (scene draws first).
+  // Each blip mirrors one real orbiting tetromino: { ang, rNorm(0..1), type, lit }.
+  // `lit` is the radar return brightness — pumped to 1 when the sweep beam crosses
+  // the contact's bearing, then decaying so it fades out after each ping.
+  const radarBlips = [];
 
   // Latest combined leaderboard, fed in via render(...data). Persisted records
   // have live:false; in-progress players have live:true.
@@ -697,6 +707,8 @@ export function createMenu({ w, h, toolkit }) {
     // tetromino debris: orbits the hole, rotates on the real Tetris tick, and
     // is slowly consumed (drawn inward) until it crosses the horizon.
     const horizon = coreR + 2 * RS;
+    const draws = []; // collected this frame, then painted back-to-front
+    radarBlips.length = 0; // rebuilt every frame from the live orbit state
     for (const d of debris) {
       // --- quantised rotation: advance whole NES ticks, step 90° when the
       // piece's interval (ticks) elapses. Interval scales with orbit speed but
@@ -717,20 +729,36 @@ export function createMenu({ w, h, toolkit }) {
         // swallowed: count it, occasionally clear a "line", respawn at the rim
         consumed++;
         if (consumed % 4 === 0) linesCleared++;
+        voidFlash = 1; // the VOID mini-hole flares as it swallows the piece
         spawnDebris(d);
+        d.radarLit = 0; // recycled piece starts dark on the scope
         continue;
       }
 
       const a = d.a + t * d.speed;
       const front = Math.sin(a) > 0;
+
+      // Feed the THREAT radar: this real contact's bearing + normalised range
+      // (closer to the hole -> closer to scope centre). Brightness is pinged and
+      // faded below, in the radar itself.
+      radarBlips.push({ d, ang: a, rNorm: clamp01(r / maxOrbit), type: d.type });
       const x = BH.x + Math.cos(a) * r;
       const y = BH.y + Math.sin(a) * r * d.squash;
       // fade + shrink as it nears the horizon, so it dissolves into the hole
       const nearness = clamp01((r - horizon) / (40 * RS));
       const sc = (front ? 1.1 : 0.72) * intro * (0.4 + 0.6 * nearness);
       if (sc <= 0.01) continue;
-      debrisTet(c, d.type, x, y, d.cell, sc, (front ? 1 : 0.55) * (0.3 + 0.7 * nearness),
-        d.rot);
+      draws.push({ d, x, y, sc, alpha: (front ? 1 : 0.55) * (0.3 + 0.7 * nearness) });
+    }
+
+    // Painter's algorithm: a piece's on-screen scale IS its depth cue (larger =
+    // nearer the camera), so sort ascending by scale and draw small/far first.
+    // This guarantees nearer pieces overlap farther ones — previously debris was
+    // drawn in array order, so a far piece could paint over a near one and break
+    // the depth illusion around the hole.
+    draws.sort((p, q) => p.sc - q.sc);
+    for (const p of draws) {
+      debrisTet(c, p.d.type, p.x, p.y, p.d.cell, p.sc, p.alpha, p.d.rot);
     }
 
     c.globalAlpha = 1;
@@ -741,35 +769,62 @@ export function createMenu({ w, h, toolkit }) {
     // ---- left column --------------------------------------------------------
     for (const p of leftPanels) panelFrame(c, p.x, p.y, p.w, p.h, p.label);
 
-    // VOID: a miniature swirling vortex — several spiral arms of particles
-    // falling inward toward a bright pulsing core, with the swallowed-pieces
-    // count as the header. Echoes the main black hole, panel-sized.
+    // VOID: a true miniature black hole — a panel-scale echo of the main anomaly,
+    // built from the SAME layered recipe (back-half accretion disk -> black event
+    // horizon -> glowing rim -> front-half disk, with depth squash) so it reads as
+    // a hole, not a smudge. It FLARES when the real hole swallows a piece. Header
+    // shows the swallowed-pieces count.
     const v = leftPanels[0];
     const vb = body(v);
     drawText(c, "VOID", vb.x, vb.top, 1, "#8a8a9a");
     const cnt = String(consumed).padStart(4, "0");
     drawText(c, cnt, vb.x + vb.w - textWidth(cnt, 1), vb.top, 1, COL.cyan);
+
+    voidFlash = Math.max(0, voidFlash - dt * 2.2); // ~0.45s flare decay
     const swirlTop = vb.top + GLYPH_H + 2;
     const vcx = v.x + v.w / 2;
     const vcy = (swirlTop + vb.bottom) / 2;
     const vmaxR = Math.min(v.w / 2 - 6, (vb.bottom - swirlTop) / 2);
-    const ARMS = 3, PER_ARM = 9;
-    for (let arm = 0; arm < ARMS; arm++) {
-      for (let i = 0; i < PER_ARM; i++) {
-        // each particle spirals in: radius shrinks with i, angle winds with t
-        const frac = i / PER_ARM;
-        const rr = vmaxR * (1 - frac) + 1;
-        const a = (arm / ARMS) * Math.PI * 2 + t * 1.8 + frac * 3.2;
-        const col = arm === 0 ? COL.cyan : arm === 1 ? COL.purple : COL.magenta;
-        const alpha = 0.25 + 0.75 * frac; // brighter near the core
-        px(c, vcx + Math.cos(a) * rr, vcy + Math.sin(a) * rr * 0.7,
-          frac > 0.6 ? 2 : 1, col, alpha);
-      }
+    const vCore = vmaxR * 0.32;           // event-horizon radius
+    const vSquash = 0.45;                 // disk seen near edge-on (depth)
+    const flare = 1 + voidFlash * 0.9;    // brighter + a touch faster on a swallow
+    const DISK = 22;                      // particles per disk half
+    // Deterministic per-particle orbit params (no per-frame allocation): each
+    // particle owns a radius band, bearing offset, colour and spin from its index.
+    const vcol = (i) => (i % 3 === 0 ? COL.cyan : i % 3 === 1 ? COL.purple : COL.magenta);
+    const vAng = (i) => (i * 2.39996) + t * (1.7 + (i % 5) * 0.12) * flare; // golden-angle spread
+    const vRad = (i) => vCore + 1 + ((i * 7) % 100) / 100 * (vmaxR - vCore);
+
+    // back half of the disk first (dimmer, behind the hole)
+    for (let i = 0; i < DISK; i++) {
+      const a = vAng(i);
+      if (Math.sin(a) > 0) continue; // front half drawn later
+      const r = vRad(i) + Math.sin(t * 1.8 + i) * 1.2;
+      px(c, vcx + Math.cos(a) * r, vcy + Math.sin(a) * r * vSquash,
+        r > vmaxR * 0.7 ? 1 : 2, vcol(i), 0.4 * flare);
     }
-    // bright pulsing core
-    c.globalAlpha = 0.7 + 0.3 * Math.sin(t * 6) ** 2;
-    c.fillStyle = COL.white;
-    c.fillRect(Math.round(vcx) - 1, Math.round(vcy) - 1, 3, 3);
+    // black event horizon
+    c.globalAlpha = 1;
+    c.fillStyle = COL.black;
+    c.beginPath();
+    c.arc(vcx, vcy, vCore + Math.sin(t * 3) * 0.5, 0, Math.PI * 2);
+    c.fill();
+    // glowing photon rim hugging the horizon (white-hot when flaring)
+    for (let i = 0; i < 14; i++) {
+      const a = (i / 14) * Math.PI * 2 + t * 1.5;
+      const r = vCore * 1.12 + Math.sin(t * 11 + i) * 0.8;
+      const rimA = 0.4 + Math.sin(t * 13 + i) * 0.3 + voidFlash * 0.4;
+      px(c, vcx + Math.cos(a) * r, vcy + Math.sin(a) * r,
+        2, voidFlash > 0.4 ? COL.white : COL.lightBlue, clamp01(rimA));
+    }
+    // front half of the disk (brighter, over the hole) — gives the depth read
+    for (let i = 0; i < DISK; i++) {
+      const a = vAng(i);
+      if (Math.sin(a) <= 0) continue; // front only
+      const r = vRad(i) + Math.sin(t * 1.8 + i) * 1.2;
+      px(c, vcx + Math.cos(a) * r, vcy + Math.sin(a) * r * vSquash,
+        r > vmaxR * 0.7 ? 1 : 2, vcol(i), Math.min(1, 0.95 * flare));
+    }
     c.globalAlpha = 1;
 
     // STATUS: a live neural agent solving a 4x4 pieces-fill puzzle (see
@@ -947,16 +1002,41 @@ export function createMenu({ w, h, toolkit }) {
     }
     c.globalAlpha = 1;
 
-    // a blip on the scope that flashes brightest as the beam sweeps over it
-    const blipA = 2.1; // fixed bearing
-    const blipR = rr * 0.62;
-    const bx = rcx + Math.cos(blipA) * blipR;
-    const by = rcy + Math.sin(blipA) * blipR;
-    let da = ((sweep - blipA) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2);
-    const lit = da < 0.6 ? 1 - da / 0.6 : 0.15; // bright just after the beam
-    c.globalAlpha = 0.3 + 0.7 * lit;
-    c.fillStyle = lit > 0.5 ? COL.white : COL.red;
-    c.fillRect(Math.round(bx) - 1, Math.round(by) - 1, 3, 3);
+    // Live contacts: every real orbiting tetromino is a blip on the scope, at
+    // its true bearing and range (range -> distance from centre, so a piece
+    // falling into the hole tracks inward). A contact PINGS to full brightness
+    // the instant the sweep beam crosses its bearing, then fades out — a radar
+    // phosphor return decaying over ~1s, independent of the piece's own motion.
+    const PING_WINDOW = 0.10;          // how close (rad) the beam must be to ping
+    const PING_FADE = 1.8;             // brightness lost per second after a ping
+    // The scope is tiny; showing all ~36 contacts is noise. Track the closest
+    // ones (smallest range = most imminent threat), which is what a threat scope
+    // would highlight. Sorting by rNorm also keeps the displayed set stable.
+    const MAX_CONTACTS = 12;
+    const contacts = radarBlips
+      .slice()
+      .sort((p, q) => p.rNorm - q.rNorm)
+      .slice(0, MAX_CONTACTS);
+    for (const b of contacts) {
+      // angular gap from the beam's leading edge to this contact (how long ago,
+      // in beam rotation, the beam last swept over it). Small => just pinged.
+      const da = ((sweep - b.ang) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2);
+      const prev = b.d.radarLit || 0;
+      const lit = da < PING_WINDOW
+        ? 1                                    // beam is on the contact: ping
+        : Math.max(0, prev - PING_FADE * dt);  // beam has passed: fade out
+      b.d.radarLit = lit;
+      if (lit <= 0.02) continue;               // fully faded -> nothing to draw
+
+      const bx = rcx + Math.cos(b.ang) * rr * b.rNorm;
+      const by = rcy + Math.sin(b.ang) * rr * b.rNorm;
+      // fresh return is white-hot, then settles to the piece's identity colour.
+      const col = lit > 0.7 ? COL.white : (PIECE_COLORS[b.type]?.main || COL.red);
+      c.globalAlpha = 0.15 + 0.85 * lit;
+      c.fillStyle = col;
+      const sz = lit > 0.7 ? 3 : 2;            // brighter return reads a touch bigger
+      c.fillRect(Math.round(bx) - (sz >> 1), Math.round(by) - (sz >> 1), sz, sz);
+    }
     c.globalAlpha = 1;
 
     // PHASE: a big number + rotating mini-L on top, a 4-segment phase progress
