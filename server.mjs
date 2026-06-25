@@ -447,7 +447,7 @@ export function createServer({
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const port = Number.parseInt(process.env.PORT ?? "3000", 10);
+  const port = Number.parseInt(process.env.PORT ?? "1337", 10);
   createServer().listen(port, () => {
     console.log(`MMO Tetris (vanilla) listening on http://localhost:${port}`);
   });
